@@ -145,6 +145,7 @@ type (
 		RetryActivity(ai *persistencespb.ActivityInfo, failure *failurepb.Failure) (enumspb.RetryState, error)
 		RecordLastActivityCompleteTime(ai *persistencespb.ActivityInfo)
 		RegenerateActivityRetryTask(ai *persistencespb.ActivityInfo, newScheduledTime time.Time) error
+		UpdateReportedProblemsSearchAttribute() error
 		GetTransientWorkflowTaskInfo(workflowTask *WorkflowTaskInfo, identity string) *historyspb.TransientWorkflowTaskInfo
 		DeleteSignalRequested(requestID string)
 		FlushBufferedEvents()

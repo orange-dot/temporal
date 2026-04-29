@@ -9,7 +9,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
+	commonpb "go.temporal.io/api/common/v1"
 	historypb "go.temporal.io/api/history/v1"
+	"go.temporal.io/api/workflowservice/v1"
 	sdkclient "go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
@@ -20,8 +22,13 @@ import (
 
 type WFTFailureReportedProblemsTestSuite struct {
 	testcore.FunctionalTestBase
-	shouldFail atomic.Bool
+	shouldFail                atomic.Bool
+	shouldBlockActivity       atomic.Bool
+	activityFailuresRemaining atomic.Int32
+	activityBlockCh           chan struct{}
 }
+
+const reportedProblemsActivityID = "reported-problems-activity"
 
 func TestWFTFailureReportedProblemsTestSuite(t *testing.T) {
 	s := new(WFTFailureReportedProblemsTestSuite)
@@ -30,6 +37,7 @@ func TestWFTFailureReportedProblemsTestSuite(t *testing.T) {
 
 func (s *WFTFailureReportedProblemsTestSuite) SetupTest() {
 	s.FunctionalTestBase.SetupTest()
+	s.activityBlockCh = make(chan struct{})
 	s.OverrideDynamicConfig(dynamicconfig.NumConsecutiveWorkflowTaskProblemsToTriggerSearchAttribute, 2)
 	s.OverrideDynamicConfig(dynamicconfig.NumConsecutiveActivityTaskProblemsToTriggerSearchAttribute, 2)
 }
@@ -47,6 +55,27 @@ func (s *WFTFailureReportedProblemsTestSuite) simpleActivity() (string, error) {
 
 func (s *WFTFailureReportedProblemsTestSuite) activityThatFailsUntilUnblocked(ctx context.Context) (string, error) {
 	if s.shouldFail.Load() {
+		return "", temporal.NewApplicationError("forced activity failure", "ForcedActivityFailure")
+	}
+	return "done!", nil
+}
+
+func (s *WFTFailureReportedProblemsTestSuite) activityThatFailsOrBlocksUntilReleased(ctx context.Context) (string, error) {
+	if s.shouldFail.Load() {
+		return "", temporal.NewApplicationError("forced activity failure", "ForcedActivityFailure")
+	}
+	if s.shouldBlockActivity.Load() {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-s.activityBlockCh:
+		}
+	}
+	return "done!", nil
+}
+
+func (s *WFTFailureReportedProblemsTestSuite) activityThatFailsConfiguredTimes(ctx context.Context) (string, error) {
+	if s.activityFailuresRemaining.Add(-1) >= 0 {
 		return "", temporal.NewApplicationError("forced activity failure", "ForcedActivityFailure")
 	}
 	return "done!", nil
@@ -76,6 +105,38 @@ func (s *WFTFailureReportedProblemsTestSuite) workflowWithRetryingActivity(ctx w
 
 	var ret string
 	err := workflow.ExecuteActivity(ctx, s.activityThatFailsUntilUnblocked).Get(ctx, &ret)
+	return ret, err
+}
+
+func (s *WFTFailureReportedProblemsTestSuite) workflowWithRetryingActivityID(ctx workflow.Context) (string, error) {
+	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		ActivityID:             reportedProblemsActivityID,
+		StartToCloseTimeout:    1 * time.Second,
+		ScheduleToCloseTimeout: 30 * time.Second,
+		RetryPolicy: &temporal.RetryPolicy{
+			InitialInterval:    100 * time.Millisecond,
+			MaximumInterval:    100 * time.Millisecond,
+			BackoffCoefficient: 1,
+		},
+	})
+
+	var ret string
+	err := workflow.ExecuteActivity(ctx, s.activityThatFailsOrBlocksUntilReleased).Get(ctx, &ret)
+	return ret, err
+}
+
+func (s *WFTFailureReportedProblemsTestSuite) workflowWithOneFailureSlowRetryActivity(ctx workflow.Context) (string, error) {
+	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		StartToCloseTimeout: 1 * time.Second,
+		RetryPolicy: &temporal.RetryPolicy{
+			InitialInterval:    5 * time.Second,
+			MaximumInterval:    5 * time.Second,
+			BackoffCoefficient: 1,
+		},
+	})
+
+	var ret string
+	err := workflow.ExecuteActivity(ctx, s.activityThatFailsConfiguredTimes).Get(ctx, &ret)
 	return ret, err
 }
 
@@ -376,7 +437,7 @@ func (s *WFTFailureReportedProblemsTestSuite) TestActivityRetryReportedProblems_
 		execution, err := s.SdkClient().DescribeWorkflowExecution(ctx, workflowRun.GetID(), workflowRun.GetRunID())
 		require.NoError(t, err)
 		require.NotEmpty(t, execution.PendingActivities)
-		require.GreaterOrEqual(t, execution.PendingActivities[0].Attempt, int32(2))
+		require.GreaterOrEqual(t, execution.PendingActivities[0].Attempt, int32(3))
 	}, 20*time.Second, 500*time.Millisecond)
 
 	s.shouldFail.Store(false)
@@ -389,6 +450,96 @@ func (s *WFTFailureReportedProblemsTestSuite) TestActivityRetryReportedProblems_
 	s.NotNil(description.TypedSearchAttributes)
 	_, ok := description.TypedSearchAttributes.GetKeywordList(temporal.NewSearchAttributeKeyKeywordList(sadefs.TemporalReportedProblems))
 	s.False(ok)
+}
+
+func (s *WFTFailureReportedProblemsTestSuite) TestActivityRetryReportedProblems_DoesNotReportAfterOneFailure() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	s.activityFailuresRemaining.Store(1)
+
+	s.SdkWorker().RegisterWorkflow(s.workflowWithOneFailureSlowRetryActivity)
+	s.SdkWorker().RegisterActivity(s.activityThatFailsConfiguredTimes)
+
+	workflowOptions := sdkclient.StartWorkflowOptions{
+		ID:        testcore.RandomizeStr("wf_id-" + s.T().Name()),
+		TaskQueue: s.TaskQueue(),
+	}
+
+	workflowRun, err := s.SdkClient().ExecuteWorkflow(ctx, workflowOptions, s.workflowWithOneFailureSlowRetryActivity)
+	s.NoError(err)
+
+	s.EventuallyWithT(func(t *assert.CollectT) {
+		execution, err := s.SdkClient().DescribeWorkflowExecution(ctx, workflowRun.GetID(), workflowRun.GetRunID())
+		require.NoError(t, err)
+		require.NotEmpty(t, execution.PendingActivities)
+		require.Equal(t, int32(2), execution.PendingActivities[0].Attempt)
+
+		description, err := s.SdkClient().DescribeWorkflow(ctx, workflowRun.GetID(), workflowRun.GetRunID())
+		require.NoError(t, err)
+		_, ok := description.TypedSearchAttributes.GetKeywordList(temporal.NewSearchAttributeKeyKeywordList(sadefs.TemporalReportedProblems))
+		require.False(t, ok)
+	}, 10*time.Second, 100*time.Millisecond)
+
+	var out string
+	s.NoError(workflowRun.Get(ctx, &out))
+}
+
+func (s *WFTFailureReportedProblemsTestSuite) TestActivityRetryReportedProblems_ResetClearsStaleProblem() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	s.shouldFail.Store(true)
+
+	s.SdkWorker().RegisterWorkflow(s.workflowWithRetryingActivityID)
+	s.SdkWorker().RegisterActivity(s.activityThatFailsOrBlocksUntilReleased)
+
+	workflowOptions := sdkclient.StartWorkflowOptions{
+		ID:        testcore.RandomizeStr("wf_id-" + s.T().Name()),
+		TaskQueue: s.TaskQueue(),
+	}
+
+	workflowRun, err := s.SdkClient().ExecuteWorkflow(ctx, workflowOptions, s.workflowWithRetryingActivityID)
+	s.NoError(err)
+
+	s.EventuallyWithT(func(t *assert.CollectT) {
+		description, err := s.SdkClient().DescribeWorkflow(ctx, workflowRun.GetID(), workflowRun.GetRunID())
+		require.NoError(t, err)
+		saValues, ok := description.TypedSearchAttributes.GetKeywordList(temporal.NewSearchAttributeKeyKeywordList(sadefs.TemporalReportedProblems))
+		require.True(t, ok)
+		require.Contains(t, saValues, "category=ActivityTaskFailed")
+		require.Contains(t, saValues, "cause=ApplicationFailure")
+
+		execution, err := s.SdkClient().DescribeWorkflowExecution(ctx, workflowRun.GetID(), workflowRun.GetRunID())
+		require.NoError(t, err)
+		require.NotEmpty(t, execution.PendingActivities)
+		require.GreaterOrEqual(t, execution.PendingActivities[0].Attempt, int32(3))
+	}, 20*time.Second, 500*time.Millisecond)
+
+	s.shouldFail.Store(false)
+	s.shouldBlockActivity.Store(true)
+
+	_, err = s.FrontendClient().ResetActivity(ctx, &workflowservice.ResetActivityRequest{
+		Namespace: s.Namespace().String(),
+		Execution: &commonpb.WorkflowExecution{
+			WorkflowId: workflowRun.GetID(),
+			RunId:      workflowRun.GetRunID(),
+		},
+		Activity: &workflowservice.ResetActivityRequest_Id{Id: reportedProblemsActivityID},
+	})
+	s.NoError(err)
+
+	s.EventuallyWithT(func(t *assert.CollectT) {
+		description, err := s.SdkClient().DescribeWorkflow(ctx, workflowRun.GetID(), workflowRun.GetRunID())
+		require.NoError(t, err)
+		_, ok := description.TypedSearchAttributes.GetKeywordList(temporal.NewSearchAttributeKeyKeywordList(sadefs.TemporalReportedProblems))
+		require.False(t, ok)
+	}, 10*time.Second, 500*time.Millisecond)
+
+	close(s.activityBlockCh)
+
+	var out string
+	s.NoError(workflowRun.Get(ctx, &out))
 }
 
 func (s *WFTFailureReportedProblemsTestSuite) TestActivityTimeoutReportedProblems_SetAndClear() {
@@ -421,7 +572,7 @@ func (s *WFTFailureReportedProblemsTestSuite) TestActivityTimeoutReportedProblem
 		execution, err := s.SdkClient().DescribeWorkflowExecution(ctx, workflowRun.GetID(), workflowRun.GetRunID())
 		require.NoError(t, err)
 		require.NotEmpty(t, execution.PendingActivities)
-		require.GreaterOrEqual(t, execution.PendingActivities[0].Attempt, int32(2))
+		require.GreaterOrEqual(t, execution.PendingActivities[0].Attempt, int32(3))
 	}, 20*time.Second, 500*time.Millisecond)
 
 	s.shouldFail.Store(false)

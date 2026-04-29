@@ -6581,7 +6581,10 @@ func (ms *MutableStateImpl) RegenerateActivityRetryTask(ai *persistencespb.Activ
 		return err
 	}
 
-	return ms.taskGenerator.GenerateActivityRetryTasks(ai)
+	if err := ms.taskGenerator.GenerateActivityRetryTasks(ai); err != nil {
+		return err
+	}
+	return ms.UpdateReportedProblemsSearchAttribute()
 }
 
 func (ms *MutableStateImpl) updateActivityInfoForRetries(
@@ -6786,8 +6789,9 @@ func (ms *MutableStateImpl) currentActivityReportedProblems() []string {
 
 	var reportedProblemSet map[string]struct{}
 	for _, activityInfo := range ms.pendingActivityInfoIDs {
+		completedProblemCount := activityInfo.GetAttempt() - 1
 		if activityInfo.GetRetryLastFailure() == nil ||
-			activityInfo.GetAttempt() < int32(consecutiveFailuresRequired) {
+			completedProblemCount < int32(consecutiveFailuresRequired) {
 			continue
 		}
 		if reportedProblemSet == nil {

@@ -56,16 +56,17 @@ Initial target behavior:
 
 ## Spike Questions
 
-- Is `ActivityInfo.Attempt` enough to count consecutive activity task problems,
-  or do we need a dedicated counter to avoid counting schedule attempts that are
-  not failures?
 - Should the signal be set during `RetryActivity`, or after the caller decides
   the retry state and records completion metrics?
-- What is the safest clear rule when multiple activities are pending and only
-  one recovers?
 
 ## Resolved Spike Choices
 
+- The activity threshold is compared with completed problem count, derived as
+  `ActivityInfo.Attempt - 1`, because retry handling advances `Attempt` to the
+  next scheduled attempt after storing `RetryLastFailure`.
+- Activity reset, unpause-with-reset, and retry-task regeneration paths recompute
+  the search attribute so stale retry problems are cleared when an activity no
+  longer qualifies.
 - Activity timeouts use a distinct `ActivityTaskTimedOut` category in this
   spike because they are operationally different from application failures
   while still having bounded cardinality.
@@ -94,13 +95,17 @@ Implemented locally:
 - gave workflow-task problems priority over activity problems when both qualify
 - reports all qualifying activity problem categories/causes as a deduplicated
   token set, rather than choosing a single pending activity
+- compares activity thresholds to completed failed attempts, not the next
+  scheduled attempt number
+- recomputes after reset/unpause/regenerate paths that can clear retry evidence
 - recomputed the search attribute from current mutable state instead of only
   blindly removing it after workflow-task success
 - renamed workflow-task clear handling to
   `ClearWorkflowTaskFailureAndRecomputeReportedProblems` so the method name
   reflects the new recompute semantics
-- added focused functional tests for application failure, timeout,
-  multi-activity deduplication, and workflow-task priority
+- added focused functional tests for application failure, timeout, off-by-one
+  threshold behavior, reset clearing, multi-activity deduplication, and
+  workflow-task priority
 
 Verification run locally:
 
@@ -114,8 +119,6 @@ test cluster binds local loopback ports.
 
 ## Follow-Up Questions
 
-- Is `ActivityInfo.Attempt` the right threshold input, or should activity
-  failures maintain an explicit consecutive-problem counter?
 - Should activity retry search-attribute updates live in mutable-state retry
   handling, or closer to the activity completion/failure APIs?
 - Does upstream prefer a distinct activity category such as
