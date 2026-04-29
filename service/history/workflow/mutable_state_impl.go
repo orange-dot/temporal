@@ -4429,6 +4429,9 @@ func (ms *MutableStateImpl) AddActivityTaskCompletedEvent(
 	if err := ms.ApplyActivityTaskCompletedEvent(event); err != nil {
 		return nil, err
 	}
+	if err := ms.UpdateReportedProblemsSearchAttribute(); err != nil {
+		return nil, err
+	}
 
 	return event, nil
 }
@@ -4477,6 +4480,9 @@ func (ms *MutableStateImpl) AddActivityTaskFailedEvent(
 		ms.namespaceEntry.Name(),
 	)
 	if err := ms.ApplyActivityTaskFailedEvent(event); err != nil {
+		return nil, err
+	}
+	if err := ms.UpdateReportedProblemsSearchAttribute(); err != nil {
 		return nil, err
 	}
 
@@ -4529,6 +4535,9 @@ func (ms *MutableStateImpl) AddActivityTaskTimedOutEvent(
 		retryState,
 	)
 	if err := ms.ApplyActivityTaskTimedOutEvent(event); err != nil {
+		return nil, err
+	}
+	if err := ms.UpdateReportedProblemsSearchAttribute(); err != nil {
 		return nil, err
 	}
 
@@ -4666,6 +4675,9 @@ func (ms *MutableStateImpl) AddActivityTaskCanceledEvent(
 		identity,
 	)
 	if err := ms.ApplyActivityTaskCanceledEvent(event); err != nil {
+		return nil, err
+	}
+	if err := ms.UpdateReportedProblemsSearchAttribute(); err != nil {
 		return nil, err
 	}
 
@@ -6500,6 +6512,9 @@ func (ms *MutableStateImpl) RetryActivity(
 		}); err != nil {
 			return enumspb.RETRY_STATE_INTERNAL_SERVER_ERROR, err
 		}
+		if err := ms.UpdateReportedProblemsSearchAttribute(); err != nil {
+			return enumspb.RETRY_STATE_INTERNAL_SERVER_ERROR, err
+		}
 
 		// TODO: uncomment once RETRY_STATE_PAUSED is supported
 		// return enumspb.RETRY_STATE_PAUSED, nil
@@ -6537,6 +6552,9 @@ func (ms *MutableStateImpl) RetryActivity(
 	}
 
 	if err := ms.taskGenerator.GenerateActivityRetryTasks(ai); err != nil {
+		return enumspb.RETRY_STATE_INTERNAL_SERVER_ERROR, err
+	}
+	if err := ms.UpdateReportedProblemsSearchAttribute(); err != nil {
 		return enumspb.RETRY_STATE_INTERNAL_SERVER_ERROR, err
 	}
 	return enumspb.RETRY_STATE_IN_PROGRESS, nil
@@ -6731,7 +6749,10 @@ func (ms *MutableStateImpl) syncReportedProblemsSearchAttribute(reportedProblems
 }
 
 func (ms *MutableStateImpl) currentReportedProblems() []string {
-	return ms.currentWorkflowTaskReportedProblems()
+	if reportedProblems := ms.currentWorkflowTaskReportedProblems(); len(reportedProblems) > 0 {
+		return reportedProblems
+	}
+	return ms.currentActivityReportedProblems()
 }
 
 func (ms *MutableStateImpl) currentWorkflowTaskReportedProblems() []string {
@@ -6755,6 +6776,67 @@ func (ms *MutableStateImpl) currentWorkflowTaskReportedProblems() []string {
 	}
 
 	return nil
+}
+
+func (ms *MutableStateImpl) currentActivityReportedProblems() []string {
+	consecutiveFailuresRequired := ms.config.NumConsecutiveActivityTaskProblemsToTriggerSearchAttribute(ms.namespaceEntry.Name().String())
+	if consecutiveFailuresRequired <= 0 {
+		return nil
+	}
+
+	var reportedProblemSet map[string]struct{}
+	for _, activityInfo := range ms.pendingActivityInfoIDs {
+		if activityInfo.GetRetryLastFailure() == nil ||
+			activityInfo.GetAttempt() < int32(consecutiveFailuresRequired) {
+			continue
+		}
+		if reportedProblemSet == nil {
+			reportedProblemSet = make(map[string]struct{})
+		}
+		for _, reportedProblem := range activityTaskReportedProblems(activityInfo.GetRetryLastFailure()) {
+			reportedProblemSet[reportedProblem] = struct{}{}
+		}
+	}
+	if len(reportedProblemSet) == 0 {
+		return nil
+	}
+
+	reportedProblems := make([]string, 0, len(reportedProblemSet))
+	for reportedProblem := range reportedProblemSet {
+		reportedProblems = append(reportedProblems, reportedProblem)
+	}
+	slices.Sort(reportedProblems)
+	return reportedProblems
+}
+
+func activityTaskReportedProblems(failure *failurepb.Failure) []string {
+	switch {
+	case failure.GetApplicationFailureInfo() != nil:
+		return []string{"category=ActivityTaskFailed", "cause=ApplicationFailure"}
+	case failure.GetTimeoutFailureInfo() != nil:
+		return []string{
+			"category=ActivityTaskTimedOut",
+			fmt.Sprintf("cause=ActivityTaskTimedOutCause%s", failure.GetTimeoutFailureInfo().GetTimeoutType().String()),
+		}
+	case failure.GetCanceledFailureInfo() != nil:
+		return []string{"category=ActivityTaskCanceled", "cause=CanceledFailure"}
+	case failure.GetTerminatedFailureInfo() != nil:
+		return []string{"category=ActivityTaskTerminated", "cause=TerminatedFailure"}
+	case failure.GetServerFailureInfo() != nil:
+		return []string{"category=ActivityTaskFailed", "cause=ServerFailure"}
+	case failure.GetResetWorkflowFailureInfo() != nil:
+		return []string{"category=ActivityTaskFailed", "cause=ResetWorkflowFailure"}
+	case failure.GetActivityFailureInfo() != nil:
+		return []string{"category=ActivityTaskFailed", "cause=ActivityFailure"}
+	case failure.GetChildWorkflowExecutionFailureInfo() != nil:
+		return []string{"category=ActivityTaskFailed", "cause=ChildWorkflowExecutionFailure"}
+	case failure.GetNexusOperationExecutionFailureInfo() != nil:
+		return []string{"category=ActivityTaskFailed", "cause=NexusOperationExecutionFailure"}
+	case failure.GetNexusHandlerFailureInfo() != nil:
+		return []string{"category=ActivityTaskFailed", "cause=NexusHandlerFailure"}
+	default:
+		return []string{"category=ActivityTaskFailed", "cause=Failure"}
+	}
 }
 
 func (ms *MutableStateImpl) ClearWorkflowTaskFailureAndRecomputeReportedProblems() error {
