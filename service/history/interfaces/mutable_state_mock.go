@@ -3702,6 +3702,20 @@ func (mr *MockMutableStateMockRecorder) UpdateActivityProgress(ai, request any) 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateActivityProgress", reflect.TypeOf((*MockMutableState)(nil).UpdateActivityProgress), ai, request)
 }
 
+// UpdateReportedProblemsSearchAttribute mocks base method.
+func (m *MockMutableState) UpdateReportedProblemsSearchAttribute() error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdateReportedProblemsSearchAttribute")
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpdateReportedProblemsSearchAttribute indicates an expected call of UpdateReportedProblemsSearchAttribute.
+func (mr *MockMutableStateMockRecorder) UpdateReportedProblemsSearchAttribute() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateReportedProblemsSearchAttribute", reflect.TypeOf((*MockMutableState)(nil).UpdateReportedProblemsSearchAttribute))
+}
+
 // UpdateActivityTaskStatusWithTimerHeartbeat mocks base method.
 func (m *MockMutableState) UpdateActivityTaskStatusWithTimerHeartbeat(scheduleEventId int64, timerTaskStatus int32, heartbeatTimeoutVisibility *time.Time) error {
 	m.ctrl.T.Helper()

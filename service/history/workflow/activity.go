@@ -319,7 +319,7 @@ func ResetActivity(
 		originalOptions = attrs.ActivityTaskScheduledEventAttributes
 	}
 
-	return mutableState.UpdateActivity(ai.ScheduledEventId, func(activityInfo *persistencespb.ActivityInfo, ms historyi.MutableState) error {
+	if err := mutableState.UpdateActivity(ai.ScheduledEventId, func(activityInfo *persistencespb.ActivityInfo, ms historyi.MutableState) error {
 		// reset the number of attempts
 		activityInfo.Attempt = 1
 		activityInfo.ActivityReset = true
@@ -375,7 +375,10 @@ func ResetActivity(
 		}
 
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	return mutableState.UpdateReportedProblemsSearchAttribute()
 }
 
 func unpauseActivityInfo(ai *persistencespb.ActivityInfo) {
@@ -421,7 +424,7 @@ func UnpauseActivity(
 		return err
 	}
 
-	return nil
+	return mutableState.UpdateReportedProblemsSearchAttribute()
 }
 
 func UnpauseActivityWithResume(
@@ -446,6 +449,9 @@ func UnpauseActivityWithResume(
 		return nil, err
 	}
 
+	if err := mutableState.UpdateReportedProblemsSearchAttribute(); err != nil {
+		return nil, err
+	}
 	return &historyservice.UnpauseActivityResponse{}, nil
 }
 
@@ -478,6 +484,9 @@ func UnpauseActivityWithReset(
 		return nil, err
 	}
 
+	if err := mutableState.UpdateReportedProblemsSearchAttribute(); err != nil {
+		return nil, err
+	}
 	return &historyservice.UnpauseActivityResponse{}, nil
 }
 

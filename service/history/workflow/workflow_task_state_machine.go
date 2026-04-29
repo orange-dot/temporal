@@ -840,8 +840,9 @@ func (m *workflowTaskStateMachine) AddWorkflowTaskCompletedEvent(
 	)
 
 	numConsecutiveWorkflowTaskProblemsToTriggerSearchAttribute := m.ms.config.NumConsecutiveWorkflowTaskProblemsToTriggerSearchAttribute(m.ms.GetNamespaceEntry().Name().String())
-	if numConsecutiveWorkflowTaskProblemsToTriggerSearchAttribute > 0 {
-		if err := m.ms.RemoveReportedProblemsSearchAttribute(); err != nil {
+	numConsecutiveActivityTaskProblemsToTriggerSearchAttribute := m.ms.config.NumConsecutiveActivityTaskProblemsToTriggerSearchAttribute(m.ms.GetNamespaceEntry().Name().String())
+	if numConsecutiveWorkflowTaskProblemsToTriggerSearchAttribute > 0 || numConsecutiveActivityTaskProblemsToTriggerSearchAttribute > 0 {
+		if err := m.ms.ClearWorkflowTaskFailureAndRecomputeReportedProblems(); err != nil {
 			return nil, err
 		}
 	}
