@@ -6685,27 +6685,17 @@ func (ms *MutableStateImpl) updatePauseInfoSearchAttribute() error {
 }
 
 func (ms *MutableStateImpl) UpdateReportedProblemsSearchAttribute() error {
-	var reportedProblems []string
-	switch wftFailure := ms.executionInfo.LastWorkflowTaskFailure.(type) {
-	case *persistencespb.WorkflowExecutionInfo_LastWorkflowTaskFailureCause:
-		reportedProblems = []string{
-			"category=WorkflowTaskFailed",
-			fmt.Sprintf("cause=WorkflowTaskFailedCause%s", wftFailure.LastWorkflowTaskFailureCause.String()),
-		}
-	case *persistencespb.WorkflowExecutionInfo_LastWorkflowTaskTimedOutType:
-		reportedProblems = []string{
-			"category=WorkflowTaskTimedOut",
-			fmt.Sprintf("cause=WorkflowTaskTimedOutCause%s", wftFailure.LastWorkflowTaskTimedOutType.String()),
-		}
-	}
+	reportedProblems := ms.currentReportedProblems()
+	return ms.syncReportedProblemsSearchAttribute(reportedProblems)
+}
 
-	reportedProblemsPayload, err := sadefs.EncodeValue(reportedProblems, enumspb.INDEXED_VALUE_TYPE_KEYWORD_LIST)
-	if err != nil {
-		return err
-	}
-
+func (ms *MutableStateImpl) syncReportedProblemsSearchAttribute(reportedProblems []string) error {
 	exeInfo := ms.executionInfo
 	if exeInfo.SearchAttributes == nil {
+		if len(reportedProblems) == 0 {
+			// No existing or recomputed problem means no visibility or log update.
+			return nil
+		}
 		exeInfo.SearchAttributes = make(map[string]*commonpb.Payload, 1)
 	}
 
@@ -6724,31 +6714,52 @@ func (ms *MutableStateImpl) UpdateReportedProblemsSearchAttribute() error {
 		return nil
 	}
 
-	// Log the search attribute change
 	ms.logReportedProblemsChange(existingProblems, reportedProblems)
+
+	if len(reportedProblems) == 0 {
+		ms.updateSearchAttributes(map[string]*commonpb.Payload{sadefs.TemporalReportedProblems: nil})
+		return ms.taskGenerator.GenerateUpsertVisibilityTask()
+	}
+
+	reportedProblemsPayload, err := sadefs.EncodeValue(reportedProblems, enumspb.INDEXED_VALUE_TYPE_KEYWORD_LIST)
+	if err != nil {
+		return err
+	}
 
 	ms.updateSearchAttributes(map[string]*commonpb.Payload{sadefs.TemporalReportedProblems: reportedProblemsPayload})
 	return ms.taskGenerator.GenerateUpsertVisibilityTask()
 }
 
-func (ms *MutableStateImpl) RemoveReportedProblemsSearchAttribute() error {
-	if ms.executionInfo.SearchAttributes == nil {
+func (ms *MutableStateImpl) currentReportedProblems() []string {
+	return ms.currentWorkflowTaskReportedProblems()
+}
+
+func (ms *MutableStateImpl) currentWorkflowTaskReportedProblems() []string {
+	consecutiveFailuresRequired := ms.config.NumConsecutiveWorkflowTaskProblemsToTriggerSearchAttribute(ms.namespaceEntry.Name().String())
+	if consecutiveFailuresRequired <= 0 ||
+		ms.executionInfo.GetWorkflowTaskAttemptsSinceLastSuccess() < int32(consecutiveFailuresRequired) {
 		return nil
 	}
 
-	temporalReportedProblems := ms.executionInfo.SearchAttributes[sadefs.TemporalReportedProblems]
-	if temporalReportedProblems == nil {
-		return nil
+	switch wftFailure := ms.executionInfo.LastWorkflowTaskFailure.(type) {
+	case *persistencespb.WorkflowExecutionInfo_LastWorkflowTaskFailureCause:
+		return []string{
+			"category=WorkflowTaskFailed",
+			fmt.Sprintf("cause=WorkflowTaskFailedCause%s", wftFailure.LastWorkflowTaskFailureCause.String()),
+		}
+	case *persistencespb.WorkflowExecutionInfo_LastWorkflowTaskTimedOutType:
+		return []string{
+			"category=WorkflowTaskTimedOut",
+			fmt.Sprintf("cause=WorkflowTaskTimedOutCause%s", wftFailure.LastWorkflowTaskTimedOutType.String()),
+		}
 	}
 
-	// Log the removal of the search attribute
-	ms.logReportedProblemsChange(ms.decodeReportedProblems(temporalReportedProblems), nil)
+	return nil
+}
 
+func (ms *MutableStateImpl) ClearWorkflowTaskFailureAndRecomputeReportedProblems() error {
 	ms.executionInfo.LastWorkflowTaskFailure = nil
-
-	// Just remove the search attribute entirely for now
-	ms.updateSearchAttributes(map[string]*commonpb.Payload{sadefs.TemporalReportedProblems: nil})
-	return ms.taskGenerator.GenerateUpsertVisibilityTask()
+	return ms.UpdateReportedProblemsSearchAttribute()
 }
 
 // logReportedProblemsChange logs changes to the TemporalReportedProblems search attribute
