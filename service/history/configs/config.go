@@ -416,6 +416,7 @@ type Config struct {
 	MaxLocalParentWorkflowVerificationDuration dynamicconfig.DurationPropertyFn
 
 	NumConsecutiveWorkflowTaskProblemsToTriggerSearchAttribute dynamicconfig.IntPropertyFnWithNamespaceFilter
+	NumConsecutiveActivityTaskProblemsToTriggerSearchAttribute dynamicconfig.IntPropertyFnWithNamespaceFilter
 
 	// Worker-Versioning related settings
 	EnableSuggestCaNOnNewTargetVersion   dynamicconfig.BoolPropertyFnWithNamespaceFilter
@@ -797,6 +798,7 @@ func NewConfig(
 		LogAllReqErrors: dynamicconfig.LogAllReqErrors.Get(dc),
 
 		NumConsecutiveWorkflowTaskProblemsToTriggerSearchAttribute: dynamicconfig.NumConsecutiveWorkflowTaskProblemsToTriggerSearchAttribute.Get(dc),
+		NumConsecutiveActivityTaskProblemsToTriggerSearchAttribute: dynamicconfig.NumConsecutiveActivityTaskProblemsToTriggerSearchAttribute.Get(dc),
 
 		// Worker-Versioning related
 		UseRevisionNumberForWorkerVersioning: dynamicconfig.UseRevisionNumberForWorkerVersioning.Get(dc),
